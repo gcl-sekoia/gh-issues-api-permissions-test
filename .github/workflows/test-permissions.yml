@@ -97,6 +97,12 @@ jobs:
 
           echo "::notice::All fixtures created"
 
+      - name: Upload test script
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-script
+          path: test.sh
+
   test-issues-write:
     name: "Test: issues: write"
     needs: setup
@@ -117,9 +123,9 @@ jobs:
       PERM_NAME: "issues: write"
     steps:
       - name: Download test script
-        run: |
-          curl -sL "https://raw.githubusercontent.com/${{ github.repository }}/main/test.sh" -o test.sh
-          chmod +x test.sh
+        uses: actions/download-artifact@v4
+        with:
+          name: test-script
       - name: Run tests
         run: ./test.sh
 
@@ -143,9 +149,9 @@ jobs:
       PERM_NAME: "pull-requests: write"
     steps:
       - name: Download test script
-        run: |
-          curl -sL "https://raw.githubusercontent.com/${{ github.repository }}/main/test.sh" -o test.sh
-          chmod +x test.sh
+        uses: actions/download-artifact@v4
+        with:
+          name: test-script
       - name: Run tests
         run: ./test.sh
 
