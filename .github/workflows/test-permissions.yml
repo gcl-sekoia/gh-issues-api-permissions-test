@@ -1,0 +1,181 @@
+name: Test Issues API Permissions Matrix
+
+# Systematically tests every /issues/ API endpoint against both actual issues
+# and pull requests, with different GITHUB_TOKEN permission scopes.
+#
+# Goal: determine which operations require `issues: write` vs `pull-requests: write`
+# when the target issue number is actually a PR.
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  setup:
+    name: Create test fixtures
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    outputs:
+      issue: ${{ steps.fixtures.outputs.issue }}
+      pr: ${{ steps.fixtures.outputs.pr }}
+      iw_issue_comment: ${{ steps.fixtures.outputs.iw_issue_comment }}
+      iw_issue_comment_del: ${{ steps.fixtures.outputs.iw_issue_comment_del }}
+      iw_pr_comment: ${{ steps.fixtures.outputs.iw_pr_comment }}
+      iw_pr_comment_del: ${{ steps.fixtures.outputs.iw_pr_comment_del }}
+      pw_issue_comment: ${{ steps.fixtures.outputs.pw_issue_comment }}
+      pw_issue_comment_del: ${{ steps.fixtures.outputs.pw_issue_comment_del }}
+      pw_pr_comment: ${{ steps.fixtures.outputs.pw_pr_comment }}
+      pw_pr_comment_del: ${{ steps.fixtures.outputs.pw_pr_comment_del }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Create fixtures
+        id: fixtures
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          # Issue
+          ISSUE=$(gh api "repos/$REPO/issues" \
+            -f title="[fixture] Test Issue $RUN_ID" \
+            -f body="For permission testing" --jq '.number')
+          echo "issue=$ISSUE" >> "$GITHUB_OUTPUT"
+          echo "::notice::Created issue #$ISSUE"
+
+          # Branch + PR
+          BRANCH="test-pr-$RUN_ID"
+          git config user.email "test@test.com"
+          git config user.name "Test"
+          git checkout -b "$BRANCH"
+          echo "$RUN_ID" > "fixture-$RUN_ID.txt"
+          git add .
+          git commit -m "fixture for run $RUN_ID"
+          git push origin "$BRANCH"
+          PR=$(gh pr create \
+            --title "[fixture] Test PR $RUN_ID" \
+            --body "For permission testing" \
+            --head "$BRANCH" --json number --jq '.number')
+          echo "pr=$PR" >> "$GITHUB_OUTPUT"
+          echo "::notice::Created PR #$PR"
+
+          # Comments — 4 per test job (update + delete × issue + PR)
+          for prefix in iw pw; do
+            for target in "issue:$ISSUE" "pr:$PR"; do
+              type="${target%%:*}"
+              num="${target##*:}"
+
+              id=$(gh api "repos/$REPO/issues/$num/comments" \
+                -f body="[$prefix-$type] fixture for update" --jq '.id')
+              echo "${prefix}_${type}_comment=$id" >> "$GITHUB_OUTPUT"
+
+              id=$(gh api "repos/$REPO/issues/$num/comments" \
+                -f body="[$prefix-$type] fixture for delete" --jq '.id')
+              echo "${prefix}_${type}_comment_del=$id" >> "$GITHUB_OUTPUT"
+            done
+          done
+
+          # Labels — one pair per test job: one to remove, one to add
+          for label in remove-iw remove-pw add-iw add-pw; do
+            gh api "repos/$REPO/labels" \
+              -f name="$label" -f color="ededed" 2>/dev/null || true
+          done
+
+          # Pre-add the "remove" labels to both issue and PR
+          for label in remove-iw remove-pw; do
+            gh api "repos/$REPO/issues/$ISSUE/labels" \
+              --input - <<< "{\"labels\":[\"$label\"]}" > /dev/null
+            gh api "repos/$REPO/issues/$PR/labels" \
+              --input - <<< "{\"labels\":[\"$label\"]}" > /dev/null
+          done
+
+          echo "::notice::All fixtures created"
+
+  test-issues-write:
+    name: "Test: issues: write"
+    needs: setup
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      ISSUE: ${{ needs.setup.outputs.issue }}
+      PR: ${{ needs.setup.outputs.pr }}
+      ISSUE_COMMENT: ${{ needs.setup.outputs.iw_issue_comment }}
+      ISSUE_COMMENT_DEL: ${{ needs.setup.outputs.iw_issue_comment_del }}
+      PR_COMMENT: ${{ needs.setup.outputs.iw_pr_comment }}
+      PR_COMMENT_DEL: ${{ needs.setup.outputs.iw_pr_comment_del }}
+      LABEL: remove-iw
+      LABEL_ADD: add-iw
+      PERM_NAME: "issues: write"
+    steps:
+      - name: Download test script
+        run: |
+          curl -sL "https://raw.githubusercontent.com/${{ github.repository }}/main/test.sh" -o test.sh
+          chmod +x test.sh
+      - name: Run tests
+        run: ./test.sh
+
+  test-prs-write:
+    name: "Test: pull-requests: write"
+    needs: setup
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      ISSUE: ${{ needs.setup.outputs.issue }}
+      PR: ${{ needs.setup.outputs.pr }}
+      ISSUE_COMMENT: ${{ needs.setup.outputs.pw_issue_comment }}
+      ISSUE_COMMENT_DEL: ${{ needs.setup.outputs.pw_issue_comment_del }}
+      PR_COMMENT: ${{ needs.setup.outputs.pw_pr_comment }}
+      PR_COMMENT_DEL: ${{ needs.setup.outputs.pw_pr_comment_del }}
+      LABEL: remove-pw
+      LABEL_ADD: add-pw
+      PERM_NAME: "pull-requests: write"
+    steps:
+      - name: Download test script
+        run: |
+          curl -sL "https://raw.githubusercontent.com/${{ github.repository }}/main/test.sh" -o test.sh
+          chmod +x test.sh
+      - name: Run tests
+        run: ./test.sh
+
+  cleanup:
+    name: Cleanup fixtures
+    needs: [setup, test-issues-write, test-prs-write]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+    steps:
+      - name: Cleanup
+        run: |
+          set -x
+          ISSUE="${{ needs.setup.outputs.issue }}"
+          PR="${{ needs.setup.outputs.pr }}"
+
+          # Close issue and PR
+          gh api "repos/$REPO/issues/$ISSUE" -X PATCH -f state=closed || true
+          gh api "repos/$REPO/pulls/$PR" -X PATCH -f state=closed || true
+
+          # Delete test branch
+          gh api "repos/$REPO/git/refs/heads/test-pr-${{ github.run_id }}" -X DELETE || true
+
+          # Delete labels
+          for label in remove-iw remove-pw add-iw add-pw; do
+            gh api "repos/$REPO/labels/$label" -X DELETE || true
+          done
