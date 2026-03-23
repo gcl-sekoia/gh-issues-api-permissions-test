@@ -58,10 +58,10 @@ jobs:
           git add .
           git commit -m "fixture for run $RUN_ID"
           git push origin "$BRANCH"
-          PR=$(gh pr create \
-            --title "[fixture] Test PR $RUN_ID" \
-            --body "For permission testing" \
-            --head "$BRANCH" --json number --jq '.number')
+          PR=$(gh api "repos/$REPO/pulls" \
+            -f title="[fixture] Test PR $RUN_ID" \
+            -f body="For permission testing" \
+            -f head="$BRANCH" -f base="main" --jq '.number')
           echo "pr=$PR" >> "$GITHUB_OUTPUT"
           echo "::notice::Created PR #$PR"
 
